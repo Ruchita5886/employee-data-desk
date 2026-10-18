@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f7f5">
+  <title>Employee Data Desk</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail" aria-label="Navigation">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+        <div><strong>query desk</strong></div>
+      </div>
+      <button class="new-chat" id="new-chat" type="button" aria-label="New conversation"><span aria-hidden="true">+</span><span class="new-chat-label">New conversation</span></button>
+      <details class="chat-history" id="chat-history" open>
+        <summary aria-label="Previous conversations" title="Previous conversations">
+          <span class="history-icon" aria-hidden="true">◷</span>
+          <span class="history-label">Previous chats</span>
+        </summary>
+        <div class="chat-history-menu">
+          <div class="chat-history-list" id="chat-history-list" aria-label="Previous conversations"></div>
+          <p class="chat-history-empty" id="chat-history-empty">No saved conversations</p>
+          <p class="chat-history-warning" id="chat-history-storage-warning" role="status" hidden>Browser storage is unavailable or full. This conversation may not be saved after reload.</p>
+        </div>
+      </details>
+      <div class="user-profile" aria-label="User profile">
+        <div class="profile-avatar" role="img" aria-label="Ruchita Rabadiya profile picture">RR</div>
+        <div class="profile-copy"><strong>Ruchita Rabadiya</strong><small>User profile</small></div>
+      </div>
+    </aside>
+
+    <main class="main-panel">
+      <header class="topbar">
+        <div class="topbar-actions">
+          <div class="theme-switch" role="group" aria-label="Appearance">
+            <button type="button" data-theme-choice="light" aria-pressed="true" title="Use light appearance"><span aria-hidden="true">☼</span>Light</button>
+            <button type="button" data-theme-choice="dark" aria-pressed="false" title="Use dark appearance"><span aria-hidden="true">◐</span>Dark</button>
+          </div>
+        </div>
+      </header>
+
+      <section class="chat-view" aria-label="Chat conversation">
+        <div class="conversation" id="conversation" aria-live="polite">
+          <div class="welcome" id="welcome">
+            <h1>Ask the data.<br><em>Get the answer.</em></h1>
+            <div class="suggestion-heading">START WITH A QUESTION</div>
+            <div class="suggestions">
+              <button class="suggestion" type="button" data-question="Show employees in Support with Active status"><span class="suggestion-icon">↗</span><span>Active Support employees</span><span class="suggestion-arrow">→</span></button>
+              <button class="suggestion" type="button" data-question="Show employees earning more than 90000, highest to lowest"><span class="suggestion-icon">＄</span><span>Top salaries</span><span class="suggestion-arrow">→</span></button>
+              <button class="suggestion" type="button" data-question="Count employees by city"><span class="suggestion-icon">▦</span><span>Headcount by city</span><span class="suggestion-arrow">→</span></button>
+              <button class="suggestion" type="button" data-question="Total salary by department"><span class="suggestion-icon">∑</span><span>Department payroll</span><span class="suggestion-arrow">→</span></button>
+            </div>
+          </div>
+          <div class="messages" id="messages"></div>
+        </div>
+
+        <div class="composer-wrap">
+          <form class="composer" id="chat-form">
+            <label class="sr-only" for="question">Ask a question about your data</label>
+            <textarea id="question" rows="1" placeholder="Ask about your data..." maxlength="4000" required></textarea>
+            <div class="composer-bottom">
+              <div class="composer-note"><span id="voice-status" aria-live="polite"></span></div>
+              <div class="composer-actions">
+                <button class="tool-button" id="record-button" type="button" aria-pressed="false" aria-label="Hold to ask by voice" title="Hold to speak, then release to send" disabled><span class="mic-icon" aria-hidden="true"></span></button>
+                <button class="send-button" id="send-button" type="submit" aria-label="Run query" title="Run query"><span>Run</span><b aria-hidden="true">↑</b></button>
+              </div>
+            </div>
+          </form>
+        </div>
+        <footer class="legal-note">All rights reserved by Ruchita Rabadiya 2026.</footer>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
