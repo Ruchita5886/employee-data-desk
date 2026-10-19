@@ -572,7 +572,7 @@ def build_employee_identifier_lookup(
         )
 
     id_match = re.search(
-        r"\b(?:(?:(?:employee|emp|staff)\s*)?(?:id|identifier)(?:\s+number)?|"
+        r"\b(?:(?:(?:employee|emp|staff)\s*)?(?:id|identifier)(?:\s+number)?|(?:details?|profile|record|information|info)\s+(?:of|for)\s+(?:employee\s+)?|"
         r"(?:employee|emp|staff)\s+(?:number|#))\s*(?:is|:|=|#)?\s*"
         r"([A-Za-z0-9][A-Za-z0-9_-]*)\b",
         question,
@@ -706,7 +706,7 @@ def build_employee_location_lookup(question: str, database: str, context: dict) 
     )
 
 
-def build_join_date_lookup(question: str, database: str, context: dict) -> str | None:
+def build_join_date_lookup(question: str, database: str, context: dict, demo_mode: bool = False) -> str | None:
     if not re.search(
         r"\b(?:join(?:ed|ing)?|hire(?:d)?|doj|start date|date of joining)\b",
         question,
@@ -943,7 +943,7 @@ def build_join_date_lookup(question: str, database: str, context: dict) -> str |
             if database == COMBINED_DATABASE else quote_identifier(table_name)
         )
         date_value = f"TRIM(CAST(t.{quote_identifier(date_column)} AS CHAR))"
-        date_expression = (
+        date_expression = f"date({date_value})" if demo_mode else (
             f"COALESCE(STR_TO_DATE({date_value}, '%Y-%m-%d'), "
             f"STR_TO_DATE({date_value}, '%Y/%m/%d'), "
             f"STR_TO_DATE({date_value}, '%m/%d/%Y'), "
@@ -1172,7 +1172,7 @@ def build_employee_profile_sql(
             "COALESCE("
             + ", ".join(f"NULLIF({value}, 'Not available')" for value in phone_values)
             + (", " if phone_values else "")
-            + "'Not available')"
+            + "'Not available')" if phone_values else "'Not available'"
         )
         email_value = "'Not available'"
         email_values = [
@@ -1904,7 +1904,7 @@ def execute_question(
     profile_lookup = False
     identifier_sql = None
     identifier_fallback_sql = None
-    if not demo_mode_enabled():
+    if not demo_mode_enabled() or re.search(r"\b(?:id|identifier)\b|\b(?:details?|profile|record|information|info)\s+(?:of|for)\s+(?:employee\s+)?#?\d+\b", question, re.IGNORECASE):
         if selected_database == "abc":
             identifier_sql = build_employee_identifier_lookup(
                 question, selected_database, database_context, "canonical"
@@ -1926,8 +1926,8 @@ def execute_question(
         profile_lookup = True
     elif not demo_mode_enabled() and (email_sql := build_email_lookup(question, selected_database, database_context)):
         sql = email_sql
-    elif not demo_mode_enabled() and (
-        join_date_sql := build_join_date_lookup(text, selected_database, database_context)
+    elif (
+        join_date_sql := build_join_date_lookup(text, selected_database, database_context, demo_mode=demo_mode_enabled())
     ):
         sql = join_date_sql
     elif not demo_mode_enabled() and (
