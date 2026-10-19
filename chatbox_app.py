@@ -492,7 +492,7 @@ def build_employee_name_lookup(
 
     if not name_queries:
         return None
-    name_rows = mysql_read_rows(" UNION ALL ".join(name_queries), database)
+    name_rows = run_select("SELECT CONCAT_WS(' ', first_name, last_name) FROM employees", database, context)["rows"] if demo_mode_enabled() else mysql_read_rows(" UNION ALL ".join(name_queries), database)
     names_by_normalized: dict[str, str] = {}
     for row in name_rows:
         if not row or not row[0]:
@@ -549,7 +549,7 @@ def build_employee_name_lookup(
                 "employee ID, email address, or phone number."
             )
     if not re.search(r"\b(she|he|they|them|her|his|their|this person|that employee|what about)\b", question, re.IGNORECASE):
-        return None
+        return (build_employee_profile_sql(" ".join(name_tokens), database, context, profile_source=profile_source), " ".join(name_tokens)) if demo_mode_enabled() and name_tokens and re.search(r"\b(?:details?|profile|information|info|contact)\b", question, re.IGNORECASE) else None
     for previous_question in reversed(history or []):
         matched_name = matching_name(previous_question)
         if matched_name:
@@ -1904,7 +1904,7 @@ def execute_question(
     profile_lookup = False
     identifier_sql = None
     identifier_fallback_sql = None
-    if not demo_mode_enabled() or re.search(r"\b(?:id|identifier)\b|\b(?:details?|profile|record|information|info)\s+(?:of|for)\s+(?:employee\s+)?#?\d+\b", question, re.IGNORECASE):
+    if not demo_mode_enabled() or re.search(r"\b(?:id|identifier)\b|\b(?:details?|profile|record|information|info)\s+(?:of|for)\s+(?:employee\s+)?#?\d+\b|(?<![\w.+-])[\w.+-]+@[\w.-]+\.[a-z]{2,}(?![\w.-])|\b(?:phone|mobile|cell|telephone|tel)\b", question, re.IGNORECASE):
         if selected_database == "abc":
             identifier_sql = build_employee_identifier_lookup(
                 question, selected_database, database_context, "canonical"
@@ -1936,7 +1936,7 @@ def execute_question(
         sql = location_sql
     elif selected_database == "employee_db" and (city_salary_query := employee_city_salary_query(text)):
         sql = city_salary_query
-    elif not demo_mode_enabled() and (
+    elif (
         employee_lookup := build_employee_name_lookup(
             question,
             selected_database,
