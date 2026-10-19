@@ -579,6 +579,20 @@ function formatChartValue(value) {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value);
 }
 
+function isListRequest(question) {
+  if (/\blist\b/i.test(question)) return true;
+  if (/\b(?:count|how many|headcount|number of|average|avg|mean|median|total|sum|minimum|min|max|maximum|highest|lowest|compare|comparison|trend|chart|graph|plot|percentage|percent|ratio|distribution|share)\b/i.test(question)) {
+    return false;
+  }
+  return /\b(?:show|display|give|provide|get)\b.{0,30}\b(?:all|every|everyone)\b/i.test(question)
+    || /\b(?:show|display|give|provide|get|find)\b.{0,40}\b(?:employees|staff|people|records|rows)\b/i.test(question)
+    || /\b(?:all|every|everyone)\b.{0,30}\b(?:employees?|staff|people|records|rows)\b/i.test(question);
+}
+
+function isIdentifierColumn(column) {
+  return /\b(?:id|identifier|number)\b/i.test(String(column).replace(/[_-]+/g, ' '));
+}
+
 function buildChartSummary(measureName, categoryName, items, chartType) {
   if (items.length < 2) return '';
   const sortedItems = [...items].sort((left, right) => right[1] - left[1]);
@@ -601,16 +615,17 @@ function buildChartSummary(measureName, categoryName, items, chartType) {
 }
 
 function buildResultChart(columns, rows, question = '') {
-  if (rows.length < 2) return null;
+  if (rows.length < 2 || isListRequest(question) || columns.some(isIdentifierColumn)) return null;
   const numericIndexes = columns.map((_, index) => index).filter((index) =>
     rows.every((row) => resultChartNumber(row[index]) !== null)
-      && !/\b(id|number)\b/i.test(columns[index])
+      && !isIdentifierColumn(columns[index])
       && !/(?:^|_)(?:date|month|year|quarter|period|week|day)(?:_|$)/i.test(columns[index])
   );
   if (!numericIndexes.length) return null;
 
   const categoryIndexes = columns.map((_, index) => index).filter((index) => {
     if (numericIndexes.includes(index)) return false;
+    if (isIdentifierColumn(columns[index])) return false;
     const values = rows.map((row) => String(row[index] ?? '').trim()).filter(Boolean);
     const uniqueCount = new Set(values).size;
     return uniqueCount > 1 && uniqueCount <= 100;
@@ -620,7 +635,7 @@ function buildResultChart(columns, rows, question = '') {
   const categoryIndex = categoryIndexes[0];
   const categoryName = columns[categoryIndex];
   const categoryLabels = rows.map((row) => String(row[categoryIndex] ?? '').trim() || 'Unspecified');
-  const isTimeSeries = /date|month|year|quarter|period|week/i.test(categoryName)
+  const isTimeSeries = /date|month|year|quarter|period|week|day/i.test(categoryName)
     || categoryLabels.every((label) => /^(?:\d{4}(?:[-/]\d{1,2})?(?:[-/]\d{1,2})?|Q[1-4]\s*\d{4})$/i.test(label));
   const countIndexes = numericIndexes.filter((index) => /count|headcount|employee|employees|records/i.test(columns[index]));
   const averageIndexes = numericIndexes.filter((index) => /average|avg/i.test(columns[index]));
@@ -661,7 +676,12 @@ function buildResultChart(columns, rows, question = '') {
 
     const measureName = columns[measureIndex];
     const isCount = /count|headcount|employee|employees|records/i.test(measureName);
-    const chartType = isTimeSeries ? 'line' : isCount && categoryCount <= 12 ? 'pie' : 'bar';
+    const requestsProportions = /\b(?:share|shares|proportion|percentage|percent|distribution)\b/i.test(question);
+    const chartType = isTimeSeries
+      ? 'line'
+      : isCount && requestsProportions && categoryCount <= 6
+        ? 'pie'
+        : 'bar';
     const figure = document.createElement('figure');
     figure.className = 'result-chart';
     figure.dataset.chartType = chartType;
@@ -799,24 +819,32 @@ function buildResultChart(columns, rows, question = '') {
   return charts.childElementCount ? charts : null;
 }
 
+function resultTableMarkup(result) {
+  const numeric = (column) => /salary|count|total|average|amount|employee_id|emp_id|number/i.test(column);
+  const thead = result.columns.map((column) => `<th>${escapeHtml(column.replaceAll('_', ' '))}</th>`).join('');
+  const tbody = result.rows.map((row) => `<tr>${result.columns.map((column, index) => `<td class="${numeric(column) ? 'numeric' : ''}">${escapeHtml(row[index] ?? '')}</td>`).join('')}</tr>`).join('');
+  const truncation = result.truncated ? '<div class="empty-result">Showing the first 2,000 rows.</div>' : '';
+  return `<div class="table-scroll"><table class="result-table"><thead><tr>${thead}</tr></thead><tbody>${tbody}</tbody></table></div>${truncation}`;
+}
+
 function renderResults(item, result, question = '') {
   const count = result.rows.length;
   const summary = `<div class="answer-copy">${escapeHtml(result.summary || '')}</div>`;
+  if (isListRequest(question) && result.columns.length && count) {
+    item.innerHTML = resultTableMarkup(result);
+    return;
+  }
   if (!result.columns.length || !count) {
     item.innerHTML = summary;
   } else if (count === 1) {
     item.innerHTML = summary;
   } else {
-    const numeric = (column) => /salary|count|total|average|amount|employee_id|emp_id|number/i.test(column);
-    const thead = result.columns.map((column) => `<th>${escapeHtml(column.replaceAll('_', ' '))}</th>`).join('');
-    const tbody = result.rows.map((row) => `<tr>${result.columns.map((column, index) => `<td class="${numeric(column) ? 'numeric' : ''}">${escapeHtml(row[index] ?? '')}</td>`).join('')}</tr>`).join('');
-    const truncation = result.truncated ? '<div class="empty-result">Showing the first 2,000 rows.</div>' : '';
     const chart = buildResultChart(result.columns, result.rows, question);
     if (chart) {
       item.replaceChildren();
       item.append(chart);
     } else {
-      item.innerHTML = `${summary}<div class="table-scroll"><table class="result-table"><thead><tr>${thead}</tr></thead><tbody>${tbody}</tbody></table></div>${truncation}`;
+      item.innerHTML = `${summary}${resultTableMarkup(result)}`;
     }
   }
   const audioButton = document.createElement('button');
