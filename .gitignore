@@ -13,3 +13,10 @@ __pycache__/
 # Local employee data
 employee_data.csv
 employee_data.xlsx
+*.csv
+*.xls
+*.xlsx
+*.sql
+*.db
+*.sqlite*
+~$*

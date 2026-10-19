@@ -14,7 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from email.message import EmailMessage
 from io import BytesIO
@@ -31,7 +31,7 @@ from reportlab.platypus import Flowable, Paragraph, SimpleDocTemplate, Spacer, T
 
 BASE_DIR = Path(__file__).resolve().parent
 HOST = os.environ.get("CHATBOX_HOST", "127.0.0.1")
-PORT = int(os.environ.get("CHATBOX_PORT", "8765"))
+PORT = int(os.environ.get("PORT", os.environ.get("CHATBOX_PORT", "8765")))
 MAX_BODY_BYTES = 16_384
 MAX_AUDIO_BYTES = 25_000_000
 MAX_RESULT_ROWS = 2_000
@@ -86,7 +86,11 @@ def demo_mode_enabled() -> bool:
 
 
 def resolve_database(database: str | None = None) -> str:
-    selected = database or ("employee_db" if demo_mode_enabled() else load_env().get("DB_NAME", "employee_db"))
+    selected = database or (
+        "employee_db"
+        if demo_mode_enabled()
+        else load_env().get("CHATBOT_DATABASE", "abc")
+    )
     if selected not in ALLOWED_DATABASES:
         raise QueryError("Choose employee_db, abc, or both databases.")
     if demo_mode_enabled() and selected != "employee_db":
@@ -310,10 +314,7 @@ def format_database_context(context: dict) -> str:
 def build_email_lookup(question: str, database: str, context: dict) -> str | None:
     match = re.search(r"(?i)(?<![\w.+-])[\w.+-]+@[\w.-]+\.[a-z]{2,}(?![\w.-])", question)
     if match:
-        email_literal = sql_literal(match.group(0).casefold())
-
-        def email_matches(expression: str) -> str:
-            return f"LOWER(TRIM({expression})) = {email_literal}"
+        return build_employee_profile_sql(match.group(0), database, context, "email")
     else:
         provider = next(
             (item for item in EMAIL_PROVIDERS if re.search(rf"(?i)\b{re.escape(item)}\b", question)),
@@ -448,7 +449,8 @@ def build_employee_name_lookup(
     database: str,
     context: dict,
     history: list[str] | None = None,
-) -> tuple[str, str] | None:
+    profile_source: str | None = None,
+) -> tuple[str | None, str] | None:
     lookup_cues = r"\b(who|whom|she|he|they|their|person|profile|details|information|info|contact|email|phone|mobile|salary|rating|status|department|city|belongs|works|about|where|from)\b"
     if not re.search(lookup_cues, question, re.IGNORECASE):
         return None
@@ -511,22 +513,519 @@ def build_employee_name_lookup(
 
     matched_name = matching_name(question)
     if matched_name:
-        return build_employee_profile_sql(matched_name, database, context), matched_name
+        return build_employee_profile_sql(
+            matched_name, database, context, profile_source=profile_source
+        ), matched_name
+    ignored_name_tokens = {
+        "a", "about", "and", "are", "by", "complete", "contact", "details", "detail",
+        "employee", "employees", "find", "for", "from", "get", "give", "he", "her",
+        "his", "id", "identifier", "information", "info", "is", "list", "look", "me",
+        "mobile", "name", "of", "person", "phone", "please", "profile", "salary",
+        "search", "she", "show", "staff", "tell", "telephone", "their", "them", "this",
+        "that", "to", "up", "what", "where", "who", "whom", "works", "working",
+    }
+    name_tokens = [
+        token.casefold()
+        for token in re.findall(r"[^\W_]+", question, re.UNICODE)
+        if not token.isdigit() and token.casefold() not in ignored_name_tokens
+    ]
+    if name_tokens:
+        partial_matches = [
+            stored_name
+            for normalized_name, stored_name in names_by_normalized.items()
+            if all(
+                re.search(rf"(?<!\w){re.escape(token)}(?!\w)", normalized_name)
+                for token in name_tokens
+            )
+        ]
+        if len(partial_matches) == 1:
+            matched_name = partial_matches[0]
+            return build_employee_profile_sql(
+                matched_name, database, context, profile_source=profile_source
+            ), matched_name
+        if len(partial_matches) > 1:
+            raise QueryError(
+                "That name matches multiple employees. Please provide the full name, "
+                "employee ID, email address, or phone number."
+            )
     if not re.search(r"\b(she|he|they|them|her|his|their|this person|that employee|what about)\b", question, re.IGNORECASE):
         return None
     for previous_question in reversed(history or []):
         matched_name = matching_name(previous_question)
         if matched_name:
-            return build_employee_profile_sql(matched_name, database, context), matched_name
+            return build_employee_profile_sql(
+                matched_name, database, context, profile_source=profile_source
+            ), matched_name
     return None
 
 
-def build_employee_profile_sql(name: str, database: str, context: dict) -> str:
-    target_name = sql_literal(name.casefold())
-    tables = context["tables"]
-    has_clean_employee_table = any(
-        key.casefold() in {"employee_db.employees", "employees"} for key in tables
+def build_employee_identifier_lookup(
+    question: str,
+    database: str,
+    context: dict,
+    profile_source: str | None = None,
+) -> str | None:
+    email_match = re.search(r"(?i)(?<![\w.+-])[\w.+-]+@[\w.-]+\.[a-z]{2,}(?![\w.-])", question)
+    if email_match:
+        return build_employee_profile_sql(
+            email_match.group(0), database, context, "email", profile_source
+        )
+
+    id_match = re.search(
+        r"\b(?:(?:(?:employee|emp|staff)\s*)?(?:id|identifier)(?:\s+number)?|"
+        r"(?:employee|emp|staff)\s+(?:number|#))\s*(?:is|:|=|#)?\s*"
+        r"([A-Za-z0-9][A-Za-z0-9_-]*)\b",
+        question,
+        re.IGNORECASE,
     )
+    if id_match:
+        return build_employee_profile_sql(
+            id_match.group(1), database, context, "id", profile_source
+        )
+
+    phone_match = re.search(
+        r"\b(?:phone|mobile|cell(?:\s+phone)?|telephone|tel)\s*(?:number)?\s*"
+        r"(?:is|:|=|#)?\s*(\+?\d[\d\s().-]{5,}\d)\b",
+        question,
+        re.IGNORECASE,
+    )
+    if phone_match:
+        digits = re.sub(r"\D", "", phone_match.group(1))
+        if len(digits) >= 7:
+            return build_employee_profile_sql(
+                phone_match.group(1), database, context, "phone", profile_source
+            )
+    return None
+
+
+def build_employee_location_lookup(question: str, database: str, context: dict) -> str | None:
+    if database != "abc":
+        return None
+    if not re.search(r"\b(?:employee|employees|staff|people)\b", question, re.IGNORECASE):
+        return None
+    if not re.search(r"\b(?:list|show|find|search|get|give|display|who)\b", question, re.IGNORECASE):
+        return None
+
+    selects: list[str] = []
+    for table_key, columns in context["tables"].items():
+        schema_name, table_name = table_key.split(".", 1) if "." in table_key else (database, table_key)
+        if not table_name.casefold().startswith("employees"):
+            continue
+        column_names = {column["name"].casefold(): column["name"] for column in columns}
+        location_column = next(
+            (
+                column_names[key]
+                for key in ("city", "location", "office_location", "branch")
+                if key in column_names
+            ),
+            None,
+        )
+        if not location_column:
+            continue
+        source_sql = (
+            f"{quote_identifier(schema_name)}.{quote_identifier(table_name)}"
+            if database == COMBINED_DATABASE else quote_identifier(table_name)
+        )
+        location_expression = (
+            f"NULLIF(TRIM(CAST(t.{quote_identifier(location_column)} AS CHAR)), '')"
+        )
+        location_rows = mysql_read_rows(
+            "SELECT JSON_ARRAY(CAST(observed_locations.location_value AS CHAR)) "
+            f"FROM (SELECT DISTINCT {location_expression} AS location_value "
+            f"FROM {source_sql} AS t WHERE {location_expression} IS NOT NULL "
+            "ORDER BY location_value LIMIT 5000) AS observed_locations",
+            database,
+        )
+        locations = {
+            str(row[0]).strip()
+            for row in location_rows
+            if row and row[0] is not None
+        }
+        matching_locations = [
+            location
+            for location in locations
+            if re.search(
+                rf"(?<!\w){re.escape(location)}(?!\w)",
+                question,
+                re.IGNORECASE,
+            )
+        ]
+        if not matching_locations:
+            continue
+        location = max(matching_locations, key=len)
+        name_expression = None
+        if "name" in column_names:
+            name_expression = f"t.{quote_identifier(column_names['name'])}"
+        elif "full_name" in column_names:
+            name_expression = f"t.{quote_identifier(column_names['full_name'])}"
+        elif {"first_name", "last_name"} <= set(column_names):
+            name_expression = (
+                f"CONCAT_WS(' ', t.{quote_identifier(column_names['first_name'])}, "
+                f"t.{quote_identifier(column_names['last_name'])})"
+            )
+        employee_id_column = next(
+            (
+                column_names[key]
+                for key in ("employee_id", "emp_id", "staff_id", "employee_number", "id")
+                if key in column_names
+            ),
+            None,
+        )
+        fields = []
+        if employee_id_column:
+            fields.append(
+                f"CAST(t.{quote_identifier(employee_id_column)} AS CHAR) "
+                f"AS {quote_identifier('employee_id')}"
+            )
+        if name_expression:
+            fields.append(
+                f"COALESCE(NULLIF(TRIM(CAST({name_expression} AS CHAR)), ''), 'Not available') "
+                f"AS {quote_identifier('name')}"
+            )
+        department_column = column_names.get("department")
+        if department_column:
+            fields.append(
+                f"t.{quote_identifier(department_column)} AS {quote_identifier('department')}"
+            )
+        fields.append(
+            f"t.{quote_identifier(location_column)} AS {quote_identifier('city')}"
+        )
+        if len(fields) == 1:
+            continue
+        selects.append(
+            f"SELECT {', '.join(fields)} FROM {source_sql} AS t "
+            f"WHERE LOWER(TRIM(CAST(t.{quote_identifier(location_column)} AS CHAR))) = "
+            f"{sql_literal(location.casefold())}"
+        )
+
+    if not selects:
+        return None
+    return (
+        "SELECT * FROM (" + " UNION ALL ".join(selects) + ") AS employee_locations "
+        f"ORDER BY name, employee_id LIMIT {MAX_RESULT_ROWS}"
+    )
+
+
+def build_join_date_lookup(question: str, database: str, context: dict) -> str | None:
+    if not re.search(
+        r"\b(?:join(?:ed|ing)?|hire(?:d)?|doj|start date|date of joining)\b",
+        question,
+        re.IGNORECASE,
+    ):
+        return None
+
+    references: list[tuple[int, date, date]] = []
+    occupied_spans: list[tuple[int, int]] = []
+
+    def add_reference(match: re.Match[str], start: date, end: date) -> None:
+        span = match.span()
+        if any(span[0] < end_pos and start_pos < span[1] for start_pos, end_pos in occupied_spans):
+            return
+        occupied_spans.append(span)
+        references.append((span[0], start, end))
+
+    def month_period(year: int, month: int) -> tuple[date, date]:
+        start = date(year, month, 1)
+        end = date(year + (month == 12), month % 12 + 1, 1)
+        return start, end
+
+    def shift_months(value: date, months: int) -> date:
+        month_index = value.year * 12 + value.month - 1 + months
+        year, month_index = divmod(month_index, 12)
+        month = month_index + 1
+        last_day = (month_period(year, month)[1] - timedelta(days=1)).day
+        return date(year, month, min(value.day, last_day))
+
+    date_patterns = (
+        (r"(?<!\d)(\d{4})[./-](\d{1,2})[./-](\d{1,2})(?!\d)", "ymd"),
+        (r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?!\d)", "mdy"),
+        (r"(?<!\d)(\d{4})[./-](\d{1,2})(?![./-]\d)(?!\d)", "ym"),
+        (r"(?<![\d./-])(\d{1,2})[./-](20\d{2})(?!\d)", "my"),
+        (r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{2})(?!\d)", "mdy_short"),
+    )
+    try:
+        for pattern, kind in date_patterns:
+            for match in re.finditer(pattern, question):
+                values = [int(value) for value in match.groups()]
+                if kind == "ymd":
+                    exact_date = date(*values)
+                    add_reference(match, exact_date, exact_date + timedelta(days=1))
+                elif kind == "mdy":
+                    first, second, year = values
+                    month, day = (second, first) if first > 12 else (first, second)
+                    exact_date = date(year, month, day)
+                    add_reference(match, exact_date, exact_date + timedelta(days=1))
+                elif kind == "mdy_short":
+                    first, second, short_year = values
+                    year = 2000 + short_year if short_year <= 68 else 1900 + short_year
+                    month, day = (second, first) if first > 12 else (first, second)
+                    exact_date = date(year, month, day)
+                    add_reference(match, exact_date, exact_date + timedelta(days=1))
+                elif kind == "my":
+                    month, year = values
+                    start, end = month_period(year, month)
+                    add_reference(match, start, end)
+                else:
+                    start, end = month_period(*values)
+                    add_reference(match, start, end)
+
+        month_names = (
+            "january|february|march|april|may|june|july|august|"
+            "september|sept|october|november|december|jan|feb|mar|apr|jun|"
+            "jul|aug|sep|oct|nov|dec"
+        )
+        ordinal = r"(?:st|nd|rd|th)?"
+        named_date_patterns = (
+            (rf"\b({month_names})\s+(\d{{1,2}}){ordinal},?\s+(\d{{4}})\b", "mdy"),
+            (rf"\b(\d{{1,2}}){ordinal}\s+({month_names}),?\s+(\d{{4}})\b", "dmy"),
+        )
+        for pattern, kind in named_date_patterns:
+            for match in re.finditer(pattern, question, re.IGNORECASE):
+                first, second, year_text = match.groups()
+                month_text, day_text = (first, second) if kind == "mdy" else (second, first)
+                month_number = datetime.strptime(month_text[:3].title(), "%b").month
+                exact_date = date(int(year_text), month_number, int(day_text))
+                add_reference(match, exact_date, exact_date + timedelta(days=1))
+
+        for pattern in (
+            rf"\b({month_names})\s+(\d{{4}})\b",
+            rf"\b(\d{{4}})\s+({month_names})\b",
+        ):
+            for match in re.finditer(pattern, question, re.IGNORECASE):
+                first, second = match.groups()
+                month_text, year_text = (first, second) if not first.isdigit() else (second, first)
+                month_number = datetime.strptime(month_text[:3].title(), "%b").month
+                start, end = month_period(int(year_text), month_number)
+                add_reference(match, start, end)
+
+        year_pattern = (
+            r"\b(?:in|during|for|year|after|before|since|from|until|by|"
+            r"on or after|on or before|join(?:ed|ing)?|hire(?:d)?)\s+(20\d{2})\b"
+        )
+        for match in re.finditer(year_pattern, question, re.IGNORECASE):
+            start, end = month_period(int(match.group(1)), 1)
+            end = date(start.year + 1, 1, 1)
+            add_reference(match, start, end)
+
+        today = datetime.now().date()
+        relative_periods = (
+            (r"\bthis year\b|\bcurrent year\b", date(today.year, 1, 1), date(today.year + 1, 1, 1)),
+            (r"\blast year\b|\bprevious year\b", date(today.year - 1, 1, 1), date(today.year, 1, 1)),
+            (r"\bthis month\b|\bcurrent month\b", *month_period(today.year, today.month)),
+            (
+                r"\blast month\b|\bprevious month\b",
+                *month_period(today.year - (today.month == 1), today.month - 1 or 12),
+            ),
+            (r"\btoday\b", today, today + timedelta(days=1)),
+            (r"\byesterday\b", today - timedelta(days=1), today),
+        )
+        for pattern, start, end in relative_periods:
+            for match in re.finditer(pattern, question, re.IGNORECASE):
+                add_reference(match, start, end)
+
+        relative_amount_pattern = (
+            r"\b(?:last|past|previous)\s+(\d+)\s+"
+            r"(day|week|month|year)s?\b"
+        )
+        for match in re.finditer(relative_amount_pattern, question, re.IGNORECASE):
+            amount = int(match.group(1))
+            unit = match.group(2).casefold()
+            if unit == "day":
+                start = today - timedelta(days=amount)
+            elif unit == "week":
+                start = today - timedelta(weeks=amount)
+            else:
+                start = shift_months(today, -amount * (12 if unit == "year" else 1))
+            add_reference(match, start, today + timedelta(days=1))
+
+        relative_year_pattern = r"\b(19\d{2}|20\d{2})\b"
+        for match in re.finditer(relative_year_pattern, question):
+            if any(
+                match.start() < end_pos and start_pos < match.end()
+                for start_pos, end_pos in occupied_spans
+            ):
+                continue
+            year = int(match.group(1))
+            add_reference(match, date(year, 1, 1), date(year + 1, 1, 1))
+    except ValueError:
+        raise QueryError(
+            "Enter a valid joining date, such as 08/30/2022, August 30, 2022, 2023/02, or February 2023."
+        )
+
+    references.sort(key=lambda item: item[0])
+    if not references:
+        return None
+
+    range_request = bool(
+        re.search(r"\bbetween\b|\bfrom\b.+\bto\b|\bthrough\b", question, re.IGNORECASE)
+        or (
+            re.search(r"\bafter\b", question, re.IGNORECASE)
+            and re.search(r"\bbefore\b", question, re.IGNORECASE)
+        )
+    )
+    if len(references) > 1 and range_request:
+        first_start, first_end = references[0][1:]
+        second_start, second_end = references[1][1:]
+        if re.search(r"\bafter\b", question, re.IGNORECASE) and re.search(
+            r"\bbefore\b", question, re.IGNORECASE
+        ):
+            lower_bound, upper_bound = first_end, second_start
+        else:
+            lower_bound = min(first_start, second_start)
+            upper_bound = max(first_end, second_end)
+        date_filter = (
+            f"{{date_expression}} >= {sql_literal(lower_bound.isoformat())} "
+            f"AND {{date_expression}} < {sql_literal(upper_bound.isoformat())}"
+        )
+    else:
+        start, end = references[0][1:]
+        comparison_match = re.search(
+            r"\b(on or after|on or before|no later than|not after|not before|"
+            r"later than|earlier than|after|before|since|from|until|through|by)\b",
+            question,
+            re.IGNORECASE,
+        )
+        comparison = comparison_match.group(1).casefold() if comparison_match else ""
+        if comparison in {"after", "later than"}:
+            date_filter = f"{{date_expression}} >= {sql_literal(end.isoformat())}"
+        elif comparison in {"before", "earlier than"}:
+            date_filter = f"{{date_expression}} < {sql_literal(start.isoformat())}"
+        elif comparison in {"since", "from", "on or after", "not before"}:
+            date_filter = f"{{date_expression}} >= {sql_literal(start.isoformat())}"
+        elif comparison in {"on or before", "no later than", "not after", "until", "through", "by"}:
+            date_filter = f"{{date_expression}} < {sql_literal(end.isoformat())}"
+        else:
+            date_filter = (
+                f"{{date_expression}} >= {sql_literal(start.isoformat())} "
+                f"AND {{date_expression}} < {sql_literal(end.isoformat())}"
+            )
+
+    date_column_names = (
+        "join_date",
+        "joining_date",
+        "date_of_joining",
+        "doj",
+        "date_joined",
+        "joined_at",
+        "hire_date",
+        "date_of_hire",
+        "hired_at",
+        "start_date",
+        "startdate",
+        "employment_start_date",
+    )
+    clean_date_schemas = {
+        key.rsplit(".", 1)[0] if "." in key else database
+        for key, columns in context["tables"].items()
+        if key.rsplit(".", 1)[-1].casefold() == "employees"
+        and any(column["name"].casefold() in date_column_names for column in columns)
+    }
+    selects: list[str] = []
+    for table_key, columns in context["tables"].items():
+        schema_name, table_name = table_key.split(".", 1) if "." in table_key else (database, table_key)
+        if not table_name.casefold().startswith("employees"):
+            continue
+        if table_name.casefold() == "employees_dirty" and schema_name in clean_date_schemas:
+            continue
+        column_names = {column["name"].casefold(): column["name"] for column in columns}
+        date_column = next(
+            (
+                column_names[name]
+                for name in date_column_names
+                if name in column_names
+            ),
+            None,
+        )
+        if not date_column:
+            continue
+        source_sql = (
+            f"{quote_identifier(schema_name)}.{quote_identifier(table_name)}"
+            if database == COMBINED_DATABASE else quote_identifier(table_name)
+        )
+        date_value = f"TRIM(CAST(t.{quote_identifier(date_column)} AS CHAR))"
+        date_expression = (
+            f"COALESCE(STR_TO_DATE({date_value}, '%Y-%m-%d'), "
+            f"STR_TO_DATE({date_value}, '%Y/%m/%d'), "
+            f"STR_TO_DATE({date_value}, '%m/%d/%Y'), "
+            f"STR_TO_DATE({date_value}, '%m/%d/%y'), "
+            f"STR_TO_DATE({date_value}, '%m-%d-%Y'), "
+            f"STR_TO_DATE({date_value}, '%m-%d-%y'), "
+            f"STR_TO_DATE({date_value}, '%d/%m/%Y'), "
+            f"STR_TO_DATE({date_value}, '%d/%m/%y'), "
+            f"STR_TO_DATE({date_value}, '%d-%m-%Y'), "
+            f"STR_TO_DATE({date_value}, '%d-%m-%y'), "
+            f"STR_TO_DATE({date_value}, '%Y.%m.%d'), "
+            f"STR_TO_DATE({date_value}, '%d.%m.%Y'), "
+            f"STR_TO_DATE({date_value}, '%m.%d.%Y'), CAST({date_value} AS DATE))"
+        )
+        employee_id_column = next(
+            (
+                column_names[name]
+                for name in ("employee_id", "emp_id", "staff_id", "employee_number", "id")
+                if name in column_names
+            ),
+            None,
+        )
+        if "name" in column_names:
+            name_expression = f"t.{quote_identifier(column_names['name'])}"
+        elif "full_name" in column_names:
+            name_expression = f"t.{quote_identifier(column_names['full_name'])}"
+        elif {"first_name", "last_name"} <= set(column_names):
+            name_expression = (
+                f"CONCAT_WS(' ', t.{quote_identifier(column_names['first_name'])}, "
+                f"t.{quote_identifier(column_names['last_name'])})"
+            )
+        else:
+            name_expression = None
+        employee_id_value = (
+            f"CAST(t.{quote_identifier(employee_id_column)} AS CHAR)"
+            if employee_id_column else "'Not available'"
+        )
+        name_value = (
+            f"COALESCE(NULLIF(TRIM(CAST({name_expression} AS CHAR)), ''), 'Not available')"
+            if name_expression else "'Not available'"
+        )
+        fields = [
+            f"{employee_id_value} AS {quote_identifier('employee_id')}",
+            f"{name_value} AS {quote_identifier('name')}",
+        ]
+        fields.append(
+            f"CAST(t.{quote_identifier(date_column)} AS CHAR) "
+            f"AS {quote_identifier('join_date')}"
+        )
+        fields.append(
+            f"{date_expression} AS {quote_identifier('_join_date_sort')}"
+        )
+        filter_sql = date_filter.format(date_expression=date_expression)
+        selects.append(
+            f"SELECT {', '.join(fields)} FROM {source_sql} AS t WHERE {filter_sql}"
+        )
+
+    if not selects:
+        return None
+    joined_employees = "(" + " UNION ALL ".join(selects) + ") AS employee_join_dates"
+    if re.search(r"\b(?:count|how many|number of|total)\b", question, re.IGNORECASE):
+        return f"SELECT COUNT(*) AS employee_count FROM {joined_employees}"
+    return (
+        "SELECT employee_id, name, join_date FROM " + joined_employees
+        + f" ORDER BY _join_date_sort, name LIMIT {MAX_RESULT_ROWS}"
+    )
+
+
+def build_employee_profile_sql(
+    identifier: str,
+    database: str,
+    context: dict,
+    identifier_type: str = "name",
+    profile_source: str | None = None,
+) -> str | None:
+    target = sql_literal(identifier.casefold())
+    tables = context["tables"]
+    clean_employee_schemas = {
+        key.rsplit(".", 1)[0] if "." in key else database
+        for key in tables
+        if key.rsplit(".", 1)[-1].casefold() == "employees"
+    }
     selects: list[str] = []
 
     def name_expression(column_names: dict[str, str], alias: str) -> str | None:
@@ -557,18 +1056,27 @@ def build_employee_profile_sql(name: str, database: str, context: dict) -> str:
         value = f"{alias}.{quote_identifier(actual_name)}"
         return f"COALESCE(NULLIF(TRIM(CAST({value} AS CHAR)), ''), 'Not available')"
 
+    def first_column(column_names: dict[str, str], candidates: tuple[str, ...]) -> str | None:
+        return next((column_names[name] for name in candidates if name in column_names), None)
+
     for table_key, columns in tables.items():
         schema_name, table_name = table_key.split(".", 1) if "." in table_key else (database, table_key)
         if not table_name.casefold().startswith("employees"):
             continue
+        if profile_source == "canonical" and table_name.casefold() != "employees":
+            continue
+        if profile_source == "messy" and table_name.casefold() != "employees_messy":
+            continue
         dirty_table_key = f"{schema_name}.employees_dirty" if database == COMBINED_DATABASE else "employees_dirty"
-        is_dirty_copy = table_name.casefold() == "employees_dirty" and has_clean_employee_table
+        is_dirty_copy = (
+            table_name.casefold() == "employees_dirty"
+            and schema_name in clean_employee_schemas
+        )
         if is_dirty_copy:
             continue
         column_names = {column["name"].casefold(): column["name"] for column in columns}
         joins_dirty = (
-            schema_name == "employee_db"
-            and table_name.casefold() == "employees"
+            table_name.casefold() == "employees"
             and dirty_table_key in tables
         )
         dirty_columns = {
@@ -582,8 +1090,6 @@ def build_employee_profile_sql(name: str, database: str, context: dict) -> str:
         )
         alias = "e" if joins_dirty else "t"
         employee_name = name_expression(column_names, alias)
-        if not employee_name:
-            continue
 
         if joins_dirty:
             dirty_name = name_expression(dirty_columns, "d")
@@ -598,32 +1104,86 @@ def build_employee_profile_sql(name: str, database: str, context: dict) -> str:
                 f"{source_sql} AS e LEFT JOIN {dirty_table} AS d "
                 f"ON d.{quote_identifier('employee_id')} = e.{quote_identifier(employee_id_column)}"
             )
-            name_filter = (
-                f"LOWER(TRIM({employee_name})) = {target_name} OR "
-                f"LOWER(TRIM({dirty_name})) = {target_name}"
-            )
-            matched_name = employee_name
-            dirty_phone = dirty_columns.get("phone_number") or dirty_columns.get("phone")
-            phone_value = display_value(dirty_columns, dirty_phone or "", "d")
-            email_column = column_names.get("email")
-            dirty_email = dirty_columns.get("email")
-            if email_column and dirty_email:
-                email_value = (
-                    f"COALESCE(NULLIF(TRIM(CAST(e.{quote_identifier(email_column)} AS CHAR)), ''), "
-                    f"NULLIF(TRIM(CAST(d.{quote_identifier(dirty_email)} AS CHAR)), ''), 'Not available')"
-                )
-            else:
-                email_value = display_value(column_names, "email", "e")
             employee_id = f"e.{quote_identifier(employee_id_column)}"
+            name_values = [(employee_name, "e"), (dirty_name, "d")]
+            phone_columns = [
+                (dirty_columns, "d"),
+                (column_names, "e"),
+            ]
+            email_columns = [(column_names, "e"), (dirty_columns, "d")]
         else:
             from_sql = f"{source_sql} AS t"
-            name_filter = f"LOWER(TRIM({employee_name})) = {target_name}"
-            matched_name = employee_name
-            phone_column = column_names.get("phone") or column_names.get("phone_number")
-            phone_value = display_value(column_names, phone_column or "", "t")
-            email_value = display_value(column_names, "email", "t")
-            employee_id_column = column_names.get("employee_id") or column_names.get("emp_id")
+            employee_id_column = first_column(
+                column_names, ("employee_id", "emp_id", "staff_id", "employee_number", "id")
+            )
             employee_id = f"t.{quote_identifier(employee_id_column)}" if employee_id_column else "NULL"
+            name_values = [(employee_name, "t")]
+            phone_columns = [(column_names, "t")]
+            email_columns = [(column_names, "t")]
+
+        phone_column_fields = ("phone_number", "phone", "mobile_number", "mobile", "telephone", "cell")
+        email_column_fields = ("email", "email_address")
+        identifier_filters: list[str] = []
+        if identifier_type == "name":
+            identifier_filters = [
+                f"LOWER(TRIM({expression})) = {target}"
+                for expression, _ in name_values
+                if expression
+            ]
+        elif identifier_type == "id":
+            id_column = first_column(
+                column_names, ("employee_id", "emp_id", "staff_id", "employee_number", "id")
+            )
+            if id_column:
+                identifier_filters.append(
+                    f"LOWER(TRIM(CAST(e.{quote_identifier(id_column)} AS CHAR))) = {target}"
+                    if joins_dirty else
+                    f"LOWER(TRIM(CAST(t.{quote_identifier(id_column)} AS CHAR))) = {target}"
+                )
+        elif identifier_type == "email":
+            for source_columns, source_alias in email_columns:
+                email_column = first_column(source_columns, email_column_fields)
+                if email_column:
+                    identifier_filters.append(
+                        f"LOWER(TRIM(CAST({source_alias}.{quote_identifier(email_column)} AS CHAR))) = {target}"
+                    )
+        elif identifier_type == "phone":
+            digits = re.sub(r"\D", "", identifier)
+            for source_columns, source_alias in phone_columns:
+                phone_column = first_column(source_columns, phone_column_fields)
+                if phone_column:
+                    expression = f"{source_alias}.{quote_identifier(phone_column)}"
+                    identifier_filters.append(
+                        "REGEXP_REPLACE(COALESCE(CAST("
+                        f"{expression} AS CHAR), ''), '[^0-9]', '') = {sql_literal(digits)}"
+                    )
+        if not identifier_filters:
+            continue
+
+        matched_name = employee_name or (
+            name_values[1][0] if joins_dirty and name_values[1][0] else "NULL"
+        )
+        phone_values = []
+        for source_columns, source_alias in phone_columns:
+            phone_column = first_column(source_columns, phone_column_fields)
+            if phone_column:
+                phone_values.append(display_value(source_columns, phone_column, source_alias))
+        phone_value = (
+            "COALESCE("
+            + ", ".join(f"NULLIF({value}, 'Not available')" for value in phone_values)
+            + (", " if phone_values else "")
+            + "'Not available')"
+        )
+        email_value = "'Not available'"
+        email_values = [
+            display_value(source_columns, email_column, source_alias)
+            for source_columns, source_alias in email_columns
+            if (email_column := first_column(source_columns, email_column_fields))
+        ]
+        if email_values:
+            email_value = "COALESCE(" + ", ".join(
+                f"NULLIF({value}, 'Not available')" for value in email_values
+            ) + ", 'Not available')"
 
         fields = [
             (f"COALESCE(CAST({employee_id} AS CHAR), 'Not available')", "employee_id"),
@@ -635,7 +1195,14 @@ def build_employee_profile_sql(name: str, database: str, context: dict) -> str:
             (display_value(column_names, "salary", alias), "salary"),
             (display_value(column_names, "hire_date", alias), "hire_date"),
             (display_value(column_names, "join_date", alias), "join_date"),
-            (display_value(column_names, "city", alias), "city"),
+            (
+                display_value(
+                    column_names,
+                    first_column(column_names, ("city", "location", "office_location", "branch")) or "",
+                    alias,
+                ),
+                "city",
+            ),
             (display_value(column_names, "rating", alias), "rating"),
             (display_value(column_names, "status", alias), "status"),
             (display_value(column_names, "manager_id", alias), "manager_id"),
@@ -644,10 +1211,19 @@ def build_employee_profile_sql(name: str, database: str, context: dict) -> str:
             f"CAST({expression} AS CHAR) AS {quote_identifier(field)}"
             for expression, field in fields
         )
-        selects.append(f"SELECT {select_fields} FROM {from_sql} WHERE ({name_filter})")
+        selects.append(
+            f"SELECT {select_fields} FROM {from_sql} "
+            f"WHERE ({' OR '.join(identifier_filters)})"
+        )
 
     if not selects:
-        raise QueryError("I couldn't find employee name fields in the selected database.")
+        if profile_source is not None:
+            return None
+        if identifier_type == "phone":
+            raise QueryError("No phone-number match was found in the selected employee data.")
+        if identifier_type == "id":
+            raise QueryError("No employee ID match was found in the selected employee data.")
+        raise QueryError("I couldn't find employee fields that support this lookup in the selected database.")
     return (
         "SELECT * FROM (" + " UNION ALL ".join(selects) + ") AS employee_profiles "
         f"ORDER BY employee_id, name LIMIT {MAX_RESULT_ROWS}"
@@ -887,9 +1463,12 @@ def azure_sql(
         )
     elif database == "abc" and "employees_messy" in context["tables"]:
         employee_guidance = (
-            "For employee email or phone requests, use employees_messy because it contains email and phone; "
-            "abc.employees does not. Match a supplied employee name case-insensitively and use only actual "
-            "stored values. Return 'Not available' for blank contact fields.\n"
+            "Use abc.employees as the canonical employee source when it contains the fields requested. "
+            "Use abc.employees_messy when a requested field such as city, email, or phone is absent from "
+            "abc.employees. For individual profile lookups, search abc.employees first and use "
+            "abc.employees_messy only when the canonical table has no match. Never combine the two tables "
+            "in employee counts or other totals. Match names case-insensitively and use only stored values; "
+            "return 'Not available' for blank contact fields.\n"
         )
     recent_questions = [item.strip()[:1_000] for item in (history or []) if item.strip()][-6:]
     question_context = ""
@@ -1198,7 +1777,8 @@ def is_employee_data_request(question: str, history: list[str] | None = None) ->
         r"\b(?:employee|employees|emp|staff|worker|workers|people|person|"
         r"salary|salaries|pay|payroll|wage|wages|compensation|department|depts?|"
         r"city|cities|location|branch|status|job title|title|designation|role|"
-        r"email|mail|phone|mobile|cell|telephone|tel|hire date|joining date|doj|"
+        r"email|mail|phone|mobile|cell|telephone|tel|name|id|identifier|"
+        r"hire date|join date|joining date|date of joining|join|joined|doj|"
         r"headcount|record|records|row|rows|data|database|table|employee id)\b"
     )
     request_cues = re.compile(
@@ -1206,9 +1786,16 @@ def is_employee_data_request(question: str, history: list[str] | None = None) ->
         r"tell me|give me|get|count|count of|number of|compare|calculate|summari[sz]e|display|"
         r"report|break down|top|bottom|highest|lowest|average|avg|total|payroll|headcount|select|"
         r"chart|graph|trend|analysis|earning|earned|more than|less than|above|"
-        r"below|between|by|per|each|details?|information|info|statistics|stats|range)\b"
+        r"below|between|after|before|since|later than|earlier than|by|per|each|"
+        r"details?|information|info|statistics|stats|range)\b"
     )
     if data_terms.search(normalized) and ("?" in question or request_cues.search(normalized)):
+        return True
+
+    if (
+        re.search(r"\b(?:details?|profile|contact information)\b", normalized)
+        and re.search(r"\b(?:show|find|search|look up|tell me|give|get|who is)\b", normalized)
+    ):
         return True
 
     follow_up_cues = re.compile(r"\b(?:and|also|what about|how about|those|them|their|same)\b")
@@ -1313,14 +1900,57 @@ def execute_question(
     settings = load_env()
     ai_ready = not demo_mode_enabled() and azure_settings_ready(settings)
     database_context = load_database_context(selected_database)
+    fallback_sql = None
+    profile_lookup = False
+    identifier_sql = None
+    identifier_fallback_sql = None
+    if not demo_mode_enabled():
+        if selected_database == "abc":
+            identifier_sql = build_employee_identifier_lookup(
+                question, selected_database, database_context, "canonical"
+            )
+            identifier_fallback_sql = build_employee_identifier_lookup(
+                question, selected_database, database_context, "messy"
+            )
+            if identifier_sql is None:
+                identifier_sql = identifier_fallback_sql
+                identifier_fallback_sql = None
+        else:
+            identifier_sql = build_employee_identifier_lookup(
+                question, selected_database, database_context
+            )
     if raw_query_prefix:
         sql = text
+    elif identifier_sql:
+        sql = identifier_sql
+        profile_lookup = True
     elif not demo_mode_enabled() and (email_sql := build_email_lookup(question, selected_database, database_context)):
         sql = email_sql
+    elif not demo_mode_enabled() and (
+        join_date_sql := build_join_date_lookup(text, selected_database, database_context)
+    ):
+        sql = join_date_sql
+    elif not demo_mode_enabled() and (
+        location_sql := build_employee_location_lookup(text, selected_database, database_context)
+    ):
+        sql = location_sql
     elif selected_database == "employee_db" and (city_salary_query := employee_city_salary_query(text)):
         sql = city_salary_query
-    elif not demo_mode_enabled() and (employee_lookup := build_employee_name_lookup(question, selected_database, database_context, history)):
-        sql, _ = employee_lookup
+    elif not demo_mode_enabled() and (
+        employee_lookup := build_employee_name_lookup(
+            question,
+            selected_database,
+            database_context,
+            history,
+            "canonical" if selected_database == "abc" else None,
+        )
+    ):
+        sql, matched_name = employee_lookup
+        profile_lookup = True
+        if selected_database == "abc":
+            fallback_sql = build_employee_profile_sql(
+                matched_name, selected_database, database_context, "name", "messy"
+            )
     elif ai_ready:
         sql = azure_sql(question, settings, selected_database, database_context, history)
     elif selected_database == "employee_db":
@@ -1328,6 +1958,15 @@ def execute_question(
     else:
         raise QueryError("Azure OpenAI is required to query the selected database in natural language.")
     result = run_select(sql, selected_database, database_context)
+    if not result["rows"] and identifier_fallback_sql:
+        result = run_select(identifier_fallback_sql, selected_database, database_context)
+    if not result["rows"] and fallback_sql:
+        result = run_select(fallback_sql, selected_database, database_context)
+    if profile_lookup and len(result["rows"]) > 1:
+        raise QueryError(
+            "The name or identifier matches multiple employee records. Please provide the full "
+            "name, employee ID, email address, or phone number."
+        )
     return {
         "summary": summarize_result(question, result["columns"], result["rows"], result.get("truncated", False)),
         **result,
@@ -2279,8 +2918,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self.send_json(200, execute_question(question, history=history))
-            except QueryError:
-                self.send_json(400, {"error": "I couldn't retrieve that data right now. Please try again."})
+            except QueryError as exc:
+                self.send_json(400, {"error": str(exc)})
         except (json.JSONDecodeError, UnicodeDecodeError):
             self.send_json(400, {"error": "Request body must be valid JSON."})
 

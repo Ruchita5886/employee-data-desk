@@ -24,6 +24,12 @@ demo backed by synthetic data.
    Configure Azure OpenAI settings there if you want AI-generated SQL for
    natural-language questions.
 
+   The local chatbot uses the `abc` database by default. Set
+   `CHATBOT_DATABASE=employee_db` or `CHATBOT_DATABASE=both` in `.env` to select
+   another default. For individual profiles in `abc`, it checks `employees`
+   first and falls back to `employees_messy` only when there is no canonical
+   match.
+
 4. Start the app:
 
    ```powershell
