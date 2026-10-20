@@ -45,6 +45,16 @@ function escapeHtml(value) {
   })[char]);
 }
 
+async function readApiJson(response) {
+  const body = await response.text();
+  try {
+    return JSON.parse(body);
+  } catch {
+    const contentType = response.headers.get('Content-Type') || 'unknown content type';
+    const responseType = contentType.toLowerCase().includes('json') ? 'invalid JSON' : 'a non-JSON response';
+    throw new Error(`The service returned ${responseType} (HTTP ${response.status}). Please try again.`);
+  }
+}
 function setTheme(theme) {
   const selectedTheme = theme === 'dark' ? 'dark' : 'light';
   document.documentElement.dataset.theme = selectedTheme;
@@ -146,7 +156,7 @@ async function transcribeRecording(audioBlob) {
       headers: { 'Content-Type': audioBlob.type || 'audio/webm' },
       body: audioBlob
     });
-    const payload = await response.json();
+    const payload = await readApiJson(response);
     if (!response.ok) throw new Error(payload.error || 'Transcription failed. Try recording again.');
     const transcript = String(payload.text || '').trim();
     if (!transcript) throw new Error('No speech detected. Try recording again in a quieter place.');
@@ -878,7 +888,7 @@ async function requestBusinessReport(question) {
     body: JSON.stringify({ question })
   });
   if (!response.ok) {
-    const payload = await response.json();
+    const payload = await readApiJson(response);
     throw new Error(payload.error || 'The business report could not be generated.');
   }
   const pdf = await response.blob();
@@ -1013,7 +1023,7 @@ function renderReportPreview(item, pdf, filename, question) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question, recipient })
       });
-      const payload = await response.json();
+      const payload = await readApiJson(response);
       if (!response.ok) throw new Error(payload.error || 'The PDF could not be emailed.');
       status.textContent = `PDF sent to ${recipient}.`;
       status.dataset.state = 'success';
@@ -1256,7 +1266,7 @@ async function submitQuestion(question) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: text, history })
       });
-      const payload = await response.json();
+      const payload = await readApiJson(response);
       if (!response.ok) throw new Error(payload.error || 'The query could not be completed.');
       responseNode.classList.add('result-message');
       renderResults(responseNode, payload, text);
@@ -1313,7 +1323,7 @@ initializeConversationHistory();
 async function checkConnection() {
   try {
     const response = await fetch('/api/health', { cache: 'no-store' });
-    const health = await response.json();
+    const health = await readApiJson(response);
     updateTranscriptionAvailability(response.ok && health.transcription_ready);
   } catch {
     updateTranscriptionAvailability(false);
