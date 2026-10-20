@@ -1927,7 +1927,7 @@ def execute_question(
     database_context = load_database_context(selected_database)
     fallback_sql = None
     profile_lookup = False
-    name_candidate_list = False
+    name_candidate_list = name_profile_lookup = False
     identifier_sql = None
     identifier_fallback_sql = None
     if not demo_mode_enabled() or re.search(r"\b(?:id|identifier)\b|\b(?:details?|profile|record|information|info)\s+(?:of|for)\s+(?:employee\s+)?#?\d+\b|(?<![\w.+-])[\w.+-]+@[\w.-]+\.[a-z]{2,}(?![\w.-])|\b(?:phone|mobile|cell|telephone|tel)\b", question, re.IGNORECASE):
@@ -1972,7 +1972,7 @@ def execute_question(
         )
     ):
         sql, matched_name, is_name_candidate_list = employee_lookup
-        name_candidate_list = is_name_candidate_list
+        name_candidate_list, name_profile_lookup = is_name_candidate_list, not is_name_candidate_list
         profile_lookup = not is_name_candidate_list
         if selected_database == "abc" and matched_name:
             fallback_sql = build_employee_profile_sql(
@@ -1989,6 +1989,23 @@ def execute_question(
         result = run_select(identifier_fallback_sql, selected_database, database_context)
     if not result["rows"] and fallback_sql:
         result = run_select(fallback_sql, selected_database, database_context)
+    if profile_lookup and name_profile_lookup and len(result["rows"]) > 1:
+        column_indexes = {column.casefold(): index for index, column in enumerate(result["columns"])}
+        employee_id_index = column_indexes.get("employee_id")
+        name_index = column_indexes.get("name")
+        if employee_id_index is not None and name_index is not None:
+            candidate_rows = []
+            seen_candidates = set()
+            for row in result["rows"]:
+                candidate = (row[employee_id_index], row[name_index])
+                if candidate not in seen_candidates:
+                    seen_candidates.add(candidate)
+                    candidate_rows.append(list(candidate))
+            if len(candidate_rows) > 1:
+                result["columns"] = ["employee_id", "name"]
+                result["rows"] = candidate_rows
+                name_candidate_list = True
+                profile_lookup = False
     if profile_lookup and len(result["rows"]) > 1:
         raise QueryError(
             "The name or identifier matches multiple employee records. Please provide the full "
